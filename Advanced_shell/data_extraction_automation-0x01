@@ -1,72 +1,54 @@
 #!/bin/bash
 
 # data_extraction_automation-0x01
-# Extract Pokémon data from JSON file using jq, awk, and sed
+# Extract Pokémon data from JSON with exact output formatting
 
 # Check if data.json exists
 if [[ ! -f "data.json" ]]; then
-    echo "Error: data.json file not found."
-    echo "Please run apiAutomation-0x00 first to fetch the data."
+    echo "Error: data.json file not found." >&2
     exit 1
 fi
 
-# Extract data using jq
-# Get name, weight, height, and type (first type only)
-# Convert weight from hectograms to kg (divide by 10)
-# Convert height from decimetres to meters (divide by 10)
+# Extract raw data using jq
 EXTRACTED_DATA=$(jq -r '
-    .name + "|" + 
-    (.weight/10|tostring) + "|" + 
-    (.height/10|tostring) + "|" + 
+    .name + " " + 
+    (.weight/10|tostring) + " " + 
+    (.height/10|tostring) + " " + 
     .types[0].type.name
 ' data.json 2>/dev/null)
 
-# Check if jq extraction was successful
+# Check if extraction worked
 if [[ -z "$EXTRACTED_DATA" ]]; then
-    echo "Error: Failed to extract data from JSON. File may be corrupted."
+    echo "Error: Failed to extract data from JSON." >&2
     exit 1
 fi
 
-# Process with awk to format the output
-# Using awk to split by pipe and format the string
-FORMATTED_OUTPUT=$(echo "$EXTRACTED_DATA" | awk -F'|' '{
-    # Capitalize first letter of the type
-    split($4, type_arr, "")
-    type_arr[1] = toupper(type_arr[1])
-    type = ""
-    for (i=1; i<=length($4); i++) {
-        type = type type_arr[i]
+# Process with awk for exact formatting
+echo "$EXTRACTED_DATA" | awk '{
+    # Extract fields
+    name = $1
+    weight = $2 + 0  # Convert to number to remove .0 if present
+    height = $3 + 0  # Convert to number to remove .0 if present
+    type = $4
+    
+    # Capitalize first letter of type
+    type = toupper(substr(type, 1, 1)) substr(type, 2)
+    
+    # Format weight - remove trailing .0 if present
+    if (weight == int(weight)) {
+        formatted_weight = sprintf("%d", weight)
+    } else {
+        formatted_weight = sprintf("%.1f", weight)
     }
     
-    # Format weight (remove trailing zeros)
-    weight = $2 + 0
+    # Format height - remove trailing .0 if present  
+    if (height == int(height)) {
+        formatted_height = sprintf("%d", height)
+    } else {
+        formatted_height = sprintf("%.1f", height)
+    }
     
-    # Format height (remove trailing zeros)
-    height = $3 + 0
-    
-    # Print formatted string
-    printf "%s is of type %s, weighs %dkg, and is %.1fm tall.\n", $1, type, weight, height
-}')
-
-# Alternative using sed for additional formatting (if needed)
-# This version uses sed to handle potential decimal formatting
-FINAL_OUTPUT=$(echo "$FORMATTED_OUTPUT" | sed '
-    # Remove any leading/trailing whitespace
-    s/^[[:space:]]*//;
-    s/[[:space:]]*$//;
-    
-    # Fix potential formatting issues with decimals
-    s/ weighs 0\.0kg/ weighs 0kg/;
-    s/ and is 0\.0m tall/ and is 0m tall/;
-    
-    # Ensure proper spacing
-    s/ , /, /g;
-    s/ \. /./g;
-')
-
-echo "$FINAL_OUTPUT"
-
-# Alternative one-liner using only jq (for comparison)
-# jq -r '"\(.name) is of type \(.types[0].type.name|ascii_upcase|.[0:1] + .[1:]), weighs \(.weight/10)kg, and is \(.height/10)m tall."' data.json
-
-exit 0
+    # Print EXACT format as required
+    printf "%s is of type %s, weighs %skg, and is %sm tall.\n", 
+           name, type, formatted_weight, formatted_height
+}'
