@@ -1,0 +1,15 @@
+# Ignore output files from the script
+data.json
+errors.txt
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.tmp
+*.temp
+
+# Ignore backup files
+*~
+*.bak
