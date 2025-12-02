@@ -1,0 +1,120 @@
+#!/bin/bash
+
+# batchProcessing-0x02
+# Batch retrieval of multiple Pokémon data with rate limiting
+
+# Configuration
+API_BASE="https://pokeapi.co/api/v2/pokemon"
+OUTPUT_DIR="pokemon_data"
+DELAY_SECONDS=1  # Delay between requests to avoid rate limiting
+MAX_RETRIES=3
+TIMEOUT=30
+
+# Pokémon list to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Function to create output directory
+create_output_dir() {
+    if [[ ! -d "$OUTPUT_DIR" ]]; then
+        mkdir -p "$OUTPUT_DIR"
+        echo "Created output directory: $OUTPUT_DIR"
+    fi
+}
+
+# Function to fetch a single Pokémon
+fetch_pokemon() {
+    local pokemon="$1"
+    local output_file="${OUTPUT_DIR}/${pokemon}.json"
+    
+    echo "Fetching data for $pokemon..."
+    
+    # Try multiple times in case of temporary failures
+    for ((retry=1; retry<=MAX_RETRIES; retry++)); do
+        # Make the API request
+        HTTP_STATUS=$(curl -s \
+            --max-time "$TIMEOUT" \
+            -w "%{http_code}" \
+            -o "${output_file}.tmp" \
+            "${API_BASE}/${pokemon}")
+        
+        # Check if curl succeeded
+        if [[ $? -eq 0 ]]; then
+            # Check HTTP status
+            if [[ "$HTTP_STATUS" == "200" ]]; then
+                # Validate JSON
+                if jq empty "${output_file}.tmp" 2>/dev/null; then
+                    # Move temp file to final location
+                    mv "${output_file}.tmp" "$output_file"
+                    echo "Saved data to ${output_file} ✅"
+                    return 0
+                else
+                    echo "Warning: Invalid JSON received for $pokemon (attempt $retry/$MAX_RETRIES)"
+                fi
+            elif [[ "$HTTP_STATUS" == "404" ]]; then
+                echo "Error: Pokémon '$pokemon' not found (HTTP 404)"
+                rm -f "${output_file}.tmp"
+                return 1
+            elif [[ "$HTTP_STATUS" == "429" ]]; then
+                echo "Warning: Rate limited (HTTP 429), waiting 5 seconds..."
+                sleep 5
+                continue
+            else
+                echo "Warning: HTTP $HTTP_STATUS for $pokemon (attempt $retry/$MAX_RETRIES)"
+            fi
+        else
+            echo "Warning: Network error for $pokemon (attempt $retry/$MAX_RETRIES)"
+        fi
+        
+        # Wait before retry (increasing delay)
+        if [[ $retry -lt $MAX_RETRIES ]]; then
+            sleep $((retry * 2))
+        fi
+    done
+    
+    # If we get here, all retries failed
+    echo "Error: Failed to fetch $pokemon after $MAX_RETRIES attempts"
+    rm -f "${output_file}.tmp"
+    return 1
+}
+
+# Main function
+main() {
+    # Create output directory
+    create_output_dir
+    
+    echo "Starting batch Pokémon data retrieval..."
+    echo "Pokémon to fetch: ${POKEMON_LIST[*]}"
+    echo "Delay between requests: ${DELAY_SECONDS}s"
+    echo "----------------------------------------"
+    
+    # Counters for success/failure
+    SUCCESS_COUNT=0
+    FAILURE_COUNT=0
+    
+    # Loop through each Pokémon
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        # Fetch the Pokémon data
+        if fetch_pokemon "$pokemon"; then
+            ((SUCCESS_COUNT++))
+        else
+            ((FAILURE_COUNT++))
+        fi
+        
+        # Add delay between requests (except after the last one)
+        if [[ "$pokemon" != "${POKEMON_LIST[-1]}" ]]; then
+            sleep "$DELAY_SECONDS"
+        fi
+    done
+    
+    # Summary
+    echo "----------------------------------------"
+    echo "Batch retrieval complete!"
+    echo "Successfully fetched: $SUCCESS_COUNT Pokémon"
+    if [[ $FAILURE_COUNT -gt 0 ]]; then
+        echo "Failed to fetch: $FAILURE_COUNT Pokémon"
+    fi
+    echo "Files saved in: $OUTPUT_DIR/"
+}
+
+# Run main function
+main "$@"
