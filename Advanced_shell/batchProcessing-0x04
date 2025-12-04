@@ -1,0 +1,168 @@
+#!/bin/bash
+
+# batchProcessing-0x04
+# Parallel Pokémon data fetching with background processes
+
+# Configuration
+API_BASE="https://pokeapi.co/api/v2/pokemon"
+OUTPUT_DIR="pokemon_data_parallel"
+MAX_PARALLEL=3  # Maximum number of concurrent requests
+DELAY_SECONDS=1  # Delay between starting new batches
+MAX_RETRIES=2    # Retries per Pokémon
+
+# Pokémon list
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Function to create output directory
+create_output_dir() {
+    if [[ ! -d "$OUTPUT_DIR" ]]; then
+        if mkdir -p "$OUTPUT_DIR"; then
+            echo "Created output directory: $OUTPUT_DIR"
+        else
+            echo "Error: Failed to create directory $OUTPUT_DIR" >&2
+            exit 1
+        fi
+    fi
+}
+
+# Function to fetch a single Pokémon (runs in background)
+fetch_pokemon_background() {
+    local pokemon="$1"
+    local output_file="${OUTPUT_DIR}/${pokemon}.json"
+    local pid=$$
+    local success=false
+    
+    # Try up to MAX_RETRIES times
+    for ((attempt=1; attempt<=MAX_RETRIES; attempt++)); do
+        # Make the API request
+        if curl -s --max-time 30 "${API_BASE}/${pokemon}" -o "${output_file}.tmp" 2>/dev/null; then
+            # Check if response is valid JSON
+            if jq . "${output_file}.tmp" >/dev/null 2>&1; then
+                mv "${output_file}.tmp" "$output_file"
+                success=true
+                break
+            else
+                # Invalid JSON
+                rm -f "${output_file}.tmp"
+                if [[ $attempt -lt $MAX_RETRIES ]]; then
+                    sleep $((attempt * 2))  # Wait before retry
+                fi
+            fi
+        else
+            # Network error
+            if [[ $attempt -lt $MAX_RETRIES ]]; then
+                sleep $((attempt * 2))  # Wait before retry
+            fi
+        fi
+    done
+    
+    # Output result based on process
+    if [[ $success == true ]]; then
+        echo "[PID:${pid}] ✅ $pokemon fetched successfully"
+    else
+        echo "[PID:${pid}] ❌ $pokemon failed after $MAX_RETRIES attempts"
+    fi
+}
+
+# Main function
+main() {
+    # Create output directory
+    create_output_dir
+    
+    echo "=== PARALLEL POKÉMON DATA FETCHING ==="
+    echo "Pokémon to fetch: ${POKEMON_LIST[*]}"
+    echo "Max parallel processes: $MAX_PARALLEL"
+    echo "Max retries per Pokémon: $MAX_RETRIES"
+    echo "Delay between batches: ${DELAY_SECONDS}s"
+    echo "======================================"
+    echo ""
+    
+    # Arrays to track processes
+    declare -a PIDS
+    declare -a POKEMON_NAMES
+    local current_index=0
+    local total=${#POKEMON_LIST[@]}
+    
+    echo "Starting parallel fetch..."
+    echo ""
+    
+    # Process Pokémon in batches
+    while [[ $current_index -lt $total ]]; do
+        # Count currently running background jobs
+        local running_jobs=$(jobs -p | wc -l)
+        
+        # Start new processes if we have capacity
+        while [[ $running_jobs -lt $MAX_PARALLEL ]] && [[ $current_index -lt $total ]]; do
+            pokemon="${POKEMON_LIST[$current_index]}"
+            
+            echo "Starting fetch for $pokemon in background..."
+            
+            # Start the fetch function in background
+            fetch_pokemon_background "$pokemon" &
+            
+            # Store PID and Pokémon name
+            PIDS+=($!)
+            POKEMON_NAMES+=("$pokemon")
+            
+            ((current_index++))
+            running_jobs=$(jobs -p | wc -l)
+            
+            # Small delay before starting next process
+            sleep 0.2
+        done
+        
+        # Wait for some processes to complete if we're at max capacity
+        if [[ $running_jobs -ge $MAX_PARALLEL ]]; then
+            echo ""
+            echo "Maximum parallel processes reached ($MAX_PARALLEL). Waiting..."
+            echo ""
+            
+            # Wait for any background process to complete
+            wait -n
+            
+            # Update running jobs count
+            running_jobs=$(jobs -p | wc -l)
+        fi
+        
+        # Delay between batches
+        sleep "$DELAY_SECONDS"
+    done
+    
+    # Wait for ALL remaining background processes to complete
+    echo ""
+    echo "Waiting for all background processes to complete..."
+    echo ""
+    
+    # Wait for all background jobs
+    wait
+    
+    # Summary
+    echo ""
+    echo "======================================"
+    echo "PARALLEL FETCH COMPLETE!"
+    echo "======================================"
+    echo ""
+    
+    # Count successful files
+    local success_count=0
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        if [[ -f "${OUTPUT_DIR}/${pokemon}.json" ]]; then
+            ((success_count++))
+        fi
+    done
+    
+    echo "Results:"
+    echo "  Total Pokémon: $total"
+    echo "  Successfully fetched: $success_count"
+    echo "  Failed: $((total - success_count))"
+    echo ""
+    echo "Files saved in: $OUTPUT_DIR/"
+    
+    # List all files
+    echo ""
+    echo "Generated files:"
+    ls -la "$OUTPUT_DIR/" 2>/dev/null || echo "No files generated"
+}
+
+# Run main function
+main "$@"
