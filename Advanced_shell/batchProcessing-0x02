@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # batchProcessing-0x02
-# Batch retrieval of multiple Pokémon data with rate limiting
+# Enhanced version with error handling and retry logic
 
 # Configuration
 API_BASE="https://pokeapi.co/api/v2/pokemon"
 OUTPUT_DIR="pokemon_data"
-DELAY_SECONDS=1  # Delay between requests to avoid rate limiting
 MAX_RETRIES=3
-TIMEOUT=30
+DELAY_SECONDS=1
+TIMEOUT_SECONDS=30
 
 # Pokémon list to fetch
 POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
@@ -16,65 +16,110 @@ POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
 # Function to create output directory
 create_output_dir() {
     if [[ ! -d "$OUTPUT_DIR" ]]; then
-        mkdir -p "$OUTPUT_DIR"
-        echo "Created output directory: $OUTPUT_DIR"
+        if mkdir -p "$OUTPUT_DIR"; then
+            echo "Created output directory: $OUTPUT_DIR"
+        else
+            echo "Error: Failed to create directory $OUTPUT_DIR" >&2
+            exit 1
+        fi
     fi
 }
 
-# Function to fetch a single Pokémon
-fetch_pokemon() {
+# Function to fetch a single Pokémon with retry logic
+fetch_pokemon_with_retry() {
     local pokemon="$1"
     local output_file="${OUTPUT_DIR}/${pokemon}.json"
+    local attempt=1
+    local success=false
     
     echo "Fetching data for $pokemon..."
     
-    # Try multiple times in case of temporary failures
-    for ((retry=1; retry<=MAX_RETRIES; retry++)); do
-        # Make the API request
-        HTTP_STATUS=$(curl -s \
-            --max-time "$TIMEOUT" \
+    # Try up to MAX_RETRIES times
+    while [[ $attempt -le $MAX_RETRIES ]] && [[ $success == false ]]; do
+        echo "  Attempt $attempt of $MAX_RETRIES..."
+        
+        # Make the API request with timeout
+        HTTP_CODE=$(curl -s \
+            --max-time "$TIMEOUT_SECONDS" \
             -w "%{http_code}" \
             -o "${output_file}.tmp" \
             "${API_BASE}/${pokemon}")
         
-        # Check if curl succeeded
-        if [[ $? -eq 0 ]]; then
-            # Check HTTP status
-            if [[ "$HTTP_STATUS" == "200" ]]; then
-                # Validate JSON
-                if jq empty "${output_file}.tmp" 2>/dev/null; then
-                    # Move temp file to final location
-                    mv "${output_file}.tmp" "$output_file"
-                    echo "Saved data to ${output_file} ✅"
-                    return 0
-                else
-                    echo "Warning: Invalid JSON received for $pokemon (attempt $retry/$MAX_RETRIES)"
-                fi
-            elif [[ "$HTTP_STATUS" == "404" ]]; then
-                echo "Error: Pokémon '$pokemon' not found (HTTP 404)"
-                rm -f "${output_file}.tmp"
-                return 1
-            elif [[ "$HTTP_STATUS" == "429" ]]; then
-                echo "Warning: Rate limited (HTTP 429), waiting 5 seconds..."
-                sleep 5
-                continue
-            else
-                echo "Warning: HTTP $HTTP_STATUS for $pokemon (attempt $retry/$MAX_RETRIES)"
-            fi
+        local curl_exit_code=$?
+        
+        # Check different failure scenarios
+        if [[ $curl_exit_code -eq 0 ]]; then
+            # Curl succeeded, check HTTP status
+            case $HTTP_CODE in
+                200)
+                    # Success! Validate JSON
+                    if jq empty "${output_file}.tmp" 2>/dev/null; then
+                        mv "${output_file}.tmp" "$output_file"
+                        echo "Saved data to ${output_file} ✅"
+                        success=true
+                    else
+                        echo "  Warning: Invalid JSON received for $pokemon"
+                        rm -f "${output_file}.tmp"
+                    fi
+                    ;;
+                404)
+                    echo "  Error: Pokémon '$pokemon' not found (HTTP 404)"
+                    rm -f "${output_file}.tmp"
+                    break  # No point retrying 404
+                    ;;
+                429)
+                    echo "  Warning: Rate limited (HTTP 429)"
+                    ;;
+                5*)
+                    echo "  Warning: Server error (HTTP $HTTP_CODE)"
+                    ;;
+                *)
+                    echo "  Warning: Unexpected HTTP status $HTTP_CODE"
+                    ;;
+            esac
         else
-            echo "Warning: Network error for $pokemon (attempt $retry/$MAX_RETRIES)"
+            # Curl failed
+            case $curl_exit_code in
+                7)  # Failed to connect
+                    echo "  Warning: Failed to connect to server"
+                    ;;
+                28) # Timeout
+                    echo "  Warning: Request timed out after $TIMEOUT_SECONDS seconds"
+                    ;;
+                *)
+                    echo "  Warning: Curl failed with exit code $curl_exit_code"
+                    ;;
+            esac
         fi
         
-        # Wait before retry (increasing delay)
-        if [[ $retry -lt $MAX_RETRIES ]]; then
-            sleep $((retry * 2))
+        # If not successful, wait before retry
+        if [[ $success == false ]] && [[ $attempt -lt $MAX_RETRIES ]]; then
+            local wait_time=$((attempt * 2))  # Exponential backoff
+            echo "  Waiting $wait_time seconds before retry..."
+            sleep $wait_time
         fi
+        
+        ((attempt++))
     done
     
-    # If we get here, all retries failed
-    echo "Error: Failed to fetch $pokemon after $MAX_RETRIES attempts"
+    # Cleanup temp file if still exists
     rm -f "${output_file}.tmp"
-    return 1
+    
+    # Return status
+    if [[ $success == true ]]; then
+        return 0
+    else
+        echo "  Error: Failed to fetch $pokemon after $MAX_RETRIES attempts ❌"
+        return 1
+    fi
+}
+
+# Function to log errors
+log_error() {
+    local pokemon="$1"
+    local error_msg="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $pokemon: $error_msg" >> "${OUTPUT_DIR}/errors.log"
 }
 
 # Main function
@@ -82,8 +127,12 @@ main() {
     # Create output directory
     create_output_dir
     
+    # Clear previous error log
+    > "${OUTPUT_DIR}/errors.log"
+    
     echo "Starting batch Pokémon data retrieval..."
     echo "Pokémon to fetch: ${POKEMON_LIST[*]}"
+    echo "Max retries per Pokémon: $MAX_RETRIES"
     echo "Delay between requests: ${DELAY_SECONDS}s"
     echo "----------------------------------------"
     
@@ -93,11 +142,11 @@ main() {
     
     # Loop through each Pokémon
     for pokemon in "${POKEMON_LIST[@]}"; do
-        # Fetch the Pokémon data
-        if fetch_pokemon "$pokemon"; then
+        if fetch_pokemon_with_retry "$pokemon"; then
             ((SUCCESS_COUNT++))
         else
             ((FAILURE_COUNT++))
+            log_error "$pokemon" "Failed after $MAX_RETRIES attempts"
         fi
         
         # Add delay between requests (except after the last one)
@@ -112,9 +161,11 @@ main() {
     echo "Successfully fetched: $SUCCESS_COUNT Pokémon"
     if [[ $FAILURE_COUNT -gt 0 ]]; then
         echo "Failed to fetch: $FAILURE_COUNT Pokémon"
+        echo "Check ${OUTPUT_DIR}/errors.log for details"
     fi
     echo "Files saved in: $OUTPUT_DIR/"
 }
 
-# Run main function
+# Run main function with error handling
 main "$@"
+exit $?
